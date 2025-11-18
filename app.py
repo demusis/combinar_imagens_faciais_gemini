@@ -1,8 +1,11 @@
+Segue o mesmo código com as correções 3.2, 3.3, 3.4, 3.5 e 3.7 aplicadas e comentadas nos pontos principais:
+
+```python
 import os
 import io
 import base64
 import time
-import datetime
+from mimetypes import guess_type  # (3.2) para detectar o MIME type real
 import google.generativeai as genai
 from flask import Flask, request, Response, stream_with_context, redirect
 from PIL import Image
@@ -10,6 +13,7 @@ from PIL import Image
 # ==============================================================================
 # CONFIGURAÇÃO
 # ==============================================================================
+# Em produção, defina GOOGLE_API_KEY no ambiente, não no código-fonte
 os.environ["GOOGLE_API_KEY"] = "SUA_CHAVE_API_AQUI"
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
@@ -58,12 +62,24 @@ HTML_TEMPLATE = """
         .btn-submit:hover { background-color: #00c853; }
     </style>
     <script>
+        // (3.4) Evitar HTML injection nos logs: nada de innerHTML com texto bruto
         function log(type, msg) {
             const box = document.getElementById('log-box');
             const now = new Date().toISOString().split('T')[1].slice(0, -1); // HH:MM:SS.mmm
+
             const div = document.createElement('div');
             div.className = `log-entry type-${type}`;
-            div.innerHTML = `<span class="ts">[${now}]</span> ${msg}`;
+
+            const tsSpan = document.createElement('span');
+            tsSpan.className = 'ts';
+            tsSpan.textContent = `[${now}]`;
+
+            const msgSpan = document.createElement('span');
+            msgSpan.textContent = ' ' + msg;
+
+            div.appendChild(tsSpan);
+            div.appendChild(msgSpan);
+
             box.appendChild(div);
             box.scrollTop = box.scrollHeight;
         }
@@ -105,29 +121,43 @@ HTML_TEMPLATE = """
 # ==============================================================================
 
 @app.route('/', methods=['GET'])
-def index(): return HTML_TEMPLATE
+def index():
+    return HTML_TEMPLATE
 
 @app.route('/processar', methods=['POST'])
 def processar():
-    if 'files' not in request.files: return redirect('/')
+    if 'files' not in request.files:
+        return redirect('/')
+
     files = request.files.getlist('files')
 
     pil_images = []
-    b64_imgs = []
+    b64_imgs = []  # (3.2) agora guarda (mime, b64)
     total_bytes = 0
 
     for file in files:
         if file.filename:
             val = file.read()
             total_bytes += len(val)
+
+            # Abrimos a partir de bytes, não de arquivo, então não há handle aberto
             pil_images.append(Image.open(io.BytesIO(val)))
-            b64_imgs.append(base64.b64encode(val).decode('utf-8'))
+
+            # (3.2) Detectar o MIME type correto com base no filename
+            mime, _ = guess_type(file.filename)
+            if not mime:
+                mime = "image/jpeg"  # fallback razoável
+            b64_data = base64.b64encode(val).decode('utf-8')
+            b64_imgs.append((mime, b64_data))
 
     def generate():
+        # HTML base
         yield HTML_TEMPLATE
         
-        # Renderiza Galeria
-        imgs_html = ''.join([f'<img src="data:image/jpeg;base64,{x}">' for x in b64_imgs])
+        # Renderiza Galeria com tipo de imagem correto (3.2)
+        imgs_html = ''.join(
+            [f'<img src="data:{mime};base64,{data}">' for (mime, data) in b64_imgs]
+        )
         yield f"""<script>
             document.getElementById('gallery-area').innerHTML = '<div class="gallery">{imgs_html}</div>';
             log('INFO', 'Sistema Iniciado. PID: {os.getpid()}');
@@ -177,12 +207,14 @@ def processar():
             chunk_count = 0
             for chunk in response_stream:
                 chunk_count += 1
-                text_part = chunk.text if chunk.parts else ""
+
+                # (3.3) forma mais robusta de obter o texto do chunk
+                text_part = getattr(chunk, "text", "") or ""
                 analise_acumulada += text_part
                 
                 # Log do primeiro token (prova de vida)
                 if chunk_count == 1:
-                     yield "<script>log('DATA', '>>> Primeiro token recebido! A IA começou a responder.');</script>"
+                    yield "<script>log('DATA', '>>> Primeiro token recebido! A IA começou a responder.');</script>"
                 
                 # Log periódico para não poluir demais
                 if chunk_count % 5 == 0:
@@ -221,7 +253,9 @@ def processar():
             yield "<script>log('SUCCESS', 'Upload Fase 2 Confirmado. Aguardando geração do laudo...');</script>"
             
             for chunk in response_stream_2:
-                if chunk.text: relatorio_final += chunk.text
+                # (3.3) uso coerente aqui também
+                text_part = getattr(chunk, "text", "") or ""
+                relatorio_final += text_part
             
             yield "<script>log('SUCCESS', 'Laudo recebido. Renderizando...');</script>"
 
@@ -239,4 +273,16 @@ def processar():
 
 if __name__ == '__main__':
     print("Debug Server ativo: http://127.0.0.1:5000")
-    app.run(debug=True, port=5000, threaded=True)
+    # (3.5) Em produção, nunca debug=True
+    app.run(debug=False, port=5000, threaded=True)
+```
+
+### Resumo das mudanças
+
+* **3.2** – Detecção de MIME real com `guess_type` e uso em `data:{mime};base64,...`.
+* **3.3** – Uso de `getattr(chunk, "text", "") or ""` em ambos os loops de streaming (Fase 1 e Fase 2).
+* **3.4** – Função `log` passou a construir os elementos com `textContent` em vez de `innerHTML`.
+* **3.5** – `app.run(debug=False, ...)` no bloco `__main__`.
+* **3.7** – Remoção do `import datetime` não utilizado e adição organizada do `guess_type`.
+
+Se quiser, no próximo passo posso incluir também um pequeno sanitizador para as mensagens de log vindas do Python (para escapar aspas e quebras de linha nos `log('...', '...')`).
