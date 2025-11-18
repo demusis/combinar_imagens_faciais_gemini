@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 import google.generativeai as genai
 from flask import Flask, request, render_template_string, redirect, flash
 from PIL import Image
@@ -8,78 +9,103 @@ from PIL import Image
 # CONFIGURAÇÃO E CONSTANTES
 # ==============================================================================
 
-# Configuração da API Key do Google Gemini
 os.environ["GOOGLE_API_KEY"] = "SUA_CHAVE_API_AQUI"
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
-# Definição do Modelo
-MODEL_NAME = 'gemini-1.5-pro-latest'
-
-# Interface do Usuário (Frontend embutido)
+# Utilizando modelo com alta capacidade de raciocínio multimodal (verifique o mais recente, muda rápido).
+MODEL_NAME = 'gemini-2.5-pro-latest'
+gemini-1.5-pro-latest
+# Frontend com visualização de Grid (Galeria)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Console de Síntese Forense (Monolítico)</title>
+    <title>Console Forense | Comparativo Visual</title>
     <style>
-        body { font-family: 'Segoe UI', sans-serif; background-color: #eceff1; padding: 40px; display: flex; justify-content: center; }
-        .container { width: 100%; max-width: 700px; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
-        h2 { color: #37474f; border-bottom: 2px solid #cfd8dc; padding-bottom: 15px; margin-top: 0; font-weight: 600; }
-        .alert { padding: 15px; margin-bottom: 20px; border-radius: 4px; font-size: 0.9rem; }
-        .alert-error { background-color: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
-        .form-group { border: 2px dashed #b0bec5; padding: 30px; text-align: center; border-radius: 6px; background: #fafafa; margin-bottom: 20px; transition: background 0.3s; }
-        .form-group:hover { background: #f0f4c3; border-color: #827717; }
-        input[type="file"] { margin-top: 10px; }
-        button { width: 100%; background-color: #455a64; color: white; border: none; padding: 15px; font-size: 1rem; font-weight: bold; cursor: pointer; border-radius: 4px; transition: background 0.2s; }
-        button:hover { background-color: #263238; }
-        .output-area { margin-top: 30px; background: #f1f8e9; padding: 20px; border-left: 5px solid #33691e; white-space: pre-wrap; line-height: 1.6; }
-        .technical-note { font-size: 0.8rem; color: #78909c; margin-top: 20px; text-align: center; }
+        body { font-family: 'Segoe UI', sans-serif; background-color: #eceff1; padding: 20px; }
+        .main-container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        
+        h2 { color: #263238; border-bottom: 2px solid #cfd8dc; padding-bottom: 10px; margin-top: 0; }
+        
+        .alert { padding: 15px; margin-bottom: 20px; border-radius: 4px; color: #c62828; background-color: #ffebee; border: 1px solid #ef9a9a; }
+        
+        /* Layout de Comparação */
+        .comparison-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin-top: 30px; }
+        
+        /* Coluna Esquerda: Inputs */
+        .input-section { background: #f5f5f5; padding: 20px; border-radius: 5px; border: 1px solid #e0e0e0; }
+        .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; margin-top: 15px; }
+        .gallery img { width: 100%; height: 100px; object-fit: cover; border-radius: 4px; border: 1px solid #ccc; }
+        
+        /* Coluna Direita: Output */
+        .output-section { background: #e8f5e9; padding: 20px; border-radius: 5px; border-left: 5px solid #2e7d32; }
+        .output-content { white-space: pre-wrap; line-height: 1.6; color: #1b5e20; font-family: 'Consolas', monospace; font-size: 0.95rem; }
+        
+        /* Formulário */
+        .control-panel { background: #cfd8dc; padding: 20px; border-radius: 5px; display: flex; align-items: center; justify-content: space-between; }
+        button { background-color: #37474f; color: white; border: none; padding: 12px 25px; font-weight: bold; cursor: pointer; border-radius: 4px; }
+        button:hover { background-color: #455a64; }
+
+        @media (max-width: 768px) { .comparison-grid { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h2>Módulo de Processamento Facial</h2>
+    <div class="main-container">
+        <h2>Módulo de Reconstrução Facial Forense</h2>
 
-        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% with messages = get_flashed_messages() %}
             {% if messages %}
-                {% for category, message in messages %}
-                    <div class="alert alert-error">{{ message }}</div>
+                {% for message in messages %}
+                    <div class="alert">{{ message }}</div>
                 {% endfor %}
             {% endif %}
         {% endwith %}
 
-        {% if erro_sistema %}
-            <div class="alert alert-error"><strong>Erro do Sistema:</strong> {{ erro_sistema }}</div>
-        {% endif %}
-
         <form action="/processar" method="post" enctype="multipart/form-data">
-            <div class="form-group">
-                <label>Carregar Dataset (Imagens do Indivíduo)</label>
-                <br><br>
-                <input type="file" name="files" multiple accept=".jpg,.jpeg,.png,.webp" required>
+            <div class="control-panel">
+                <div>
+                    <strong>Dataset de Entrada:</strong>
+                    <input type="file" name="files" multiple accept=".jpg,.jpeg,.png,.webp" required>
+                    <div style="font-size: 0.8em; margin-top: 5px; color: #546e7a;">Suporta imagens degradadas, CFTV e ângulos oblíquos.</div>
+                </div>
+                <button type="submit">Executar Análise & Síntese</button>
             </div>
-            <button type="submit">Iniciar Síntese Forense</button>
         </form>
 
-        {% if resultado %}
-        <div class="output-area">
-            <strong>Retorno da Inferência:</strong><br><br>
-            {{ resultado }}
+        {% if inputs_b64 or resultado %}
+        <div class="comparison-grid">
+            
+            <div class="input-section">
+                <h3>Evidências de Entrada</h3>
+                <div style="font-size: 0.85rem; color: #666;">Imagens originais carregadas na memória (RAM):</div>
+                <div class="gallery">
+                    {% for img_data in inputs_b64 %}
+                        <img src="data:image/jpeg;base64,{{ img_data }}" title="Evidência Input">
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="output-section">
+                <h3>Síntese / Reconstrução</h3>
+                <div class="output-content">
+                    {% if resultado %}
+                        {{ resultado }}
+                    {% else %}
+                        <em>Aguardando processamento...</em>
+                    {% endif %}
+                </div>
+            </div>
         </div>
         {% endif %}
-        
-        <div class="technical-note">
-            Ambiente de execução única. Nenhuma imagem é retida no servidor.
-        </div>
     </div>
 </body>
 </html>
 """
 
 # ==============================================================================
-# LÓGICA DO SERVIDOR (BACKEND)
+# LÓGICA DO SERVIDOR
 # ==============================================================================
 
 app = Flask(__name__)
@@ -92,55 +118,75 @@ def index():
 @app.route('/processar', methods=['POST'])
 def processar():
     if 'files' not in request.files:
-        flash('Requisição inválida: nenhum arquivo anexado.')
+        flash('Erro: Requisição vazia.')
         return redirect('/')
 
     files = request.files.getlist('files')
     if not files or files[0].filename == '':
-        flash('Nenhum arquivo foi selecionado para upload.')
+        flash('Erro: Nenhuma imagem selecionada.')
         return redirect('/')
 
-    # Carregamento e pré-processamento em memória
-    input_images = []
+    pil_images = [] # Objetos PIL para a IA
+    base64_images = [] # Strings para o HTML
+    
     try:
         for file in files:
             if file.filename:
-                # Leitura direta do buffer de bytes para PIL
-                image_bytes = file.read()
-                img = Image.open(io.BytesIO(image_bytes))
-                input_images.append(img)
+                # Lê os bytes do arquivo uma única vez
+                file_bytes = file.read()
+                
+                # 1. Prepara para a IA (Pillow)
+                img = Image.open(io.BytesIO(file_bytes))
+                pil_images.append(img)
+                
+                # 2. Prepara para o Frontend (Base64)
+                # Converte bytes brutos para string base64
+                b64_str = base64.b64encode(file_bytes).decode('utf-8')
+                base64_images.append(b64_str)
+                
     except Exception as e:
-        return render_template_string(HTML_TEMPLATE, erro_sistema=f"Falha na leitura de I/O: {e}")
+        flash(f"Falha no processamento de imagem: {str(e)}")
+        return redirect('/')
 
-    # Construção do Prompt de Engenharia Forense
+    # Prompt Avançado de Reconstrução (Versão Craniométrica Estendida)
     prompt_sistema = """
-    Contexto: Atuação como perito forense digital.
-    Tarefa: Analisar o conjunto de imagens faciais fornecidas de um único sujeito.
-    Objetivo: Sintetizar uma descrição ou representação visual para "Norma de Identificação Civil" (Mugshot).
+    Contexto: Perícia Forense Digital e Antropometria Computacional.
     
-    Requisitos Rígidos:
-    1. Orientação: Frontal estrita (0º pitch/yaw/roll).
-    2. Invariantes: Manter morfologia exata de nariz, olhos e queixo.
-    3. Expressão: Neutra total (sem sorriso, olhos abertos).
-    4. Iluminação: Uniforme, eliminando sombras de alto contraste presentes nas originais.
+    INPUT: Dataset de imagens degradadas e multi-angulares.
     
-    Saída Esperada: Gere o resultado focando na precisão anatômica para fins de reconhecimento.
+    TAREFA DE PROCESSAMENTO E RESTAURAÇÃO:
+    
+    1. ANCORAGEM DE MARCOS ANATÔMICOS (Rigor Craniométrico):
+       Ao sintetizar a face, você deve travar e preservar estritamente os seguintes invariantes ósseos:
+       - Zona Orbital: Distância Intercantal (cantos internos) e Cumes Supraorbitais (testa/sobrancelha).
+       - Zona Média: Largura Bizigomática (projeção das maçãs do rosto) e Abertura Piriforme (largura da base nasal real, ignorando cartilagem bulbosa).
+       - Zona Inferior: Ângulo Goníaco (curva da mandíbula posterior) e Pogonion (proeminência do queixo).
+       - Lateralidade: Morfologia da Orelha (se visível nos inputs).
+       
+    2. FILTRAGEM DE RUÍDO E RETIFICAÇÃO:
+       - Diferencie pixelização de textura da pele.
+       - Corrija distorções de lente (barrel distortion) usando triangulação das vistas oblíquas.
+       - Remova elementos transientes: barba, óculos, sombras de alto contraste.
+    
+    OUTPUT SOLICITADO:
+    Descrição técnica ou Síntese Visual em "Norma de Identificação Civil" (Mugshot):
+    - Pose: Frontalidade absoluta (Plano de Frankfurt alinhado).
+    - Iluminação: Difusa (Flat Lighting) para evidenciar a volumetria óssea sem sombras enganosas.
+    - Expressão: Neutra (repouso mecânico).
     """
 
-    # Chamada à API
     try:
         model = genai.GenerativeModel(MODEL_NAME)
-        response = model.generate_content([prompt_sistema] + input_images)
+        response = model.generate_content([prompt_sistema] + pil_images)
+        texto_resultado = response.text if response.parts else "A API processou os dados mas não retornou descrição textual. Verifique se houve bloqueio de segurança."
         
-        # Verificação e extração do resultado
-        texto_resultado = response.text if response.parts else "Aviso: O modelo processou a entrada mas não retornou texto descritivo. Verifique filtros de segurança."
-        
-        return render_template_string(HTML_TEMPLATE, resultado=texto_resultado)
+        # Renderiza a página com os inputs (esquerda) e o resultado (direita)
+        return render_template_string(HTML_TEMPLATE, inputs_b64=base64_images, resultado=texto_resultado)
 
     except Exception as e:
-        return render_template_string(HTML_TEMPLATE, erro_sistema=f"Erro na API Google Gemini: {e}")
+        flash(f"Erro de comunicação com a API Gemini: {str(e)}")
+        return redirect('/')
 
 if __name__ == '__main__':
-    # Inicia o servidor local na porta 5000
-    print("Iniciando servidor em http://127.0.0.1:5000")
+    print("Servidor Forense Visual ativo em http://127.0.0.1:5000")
     app.run(debug=True, port=5000)
