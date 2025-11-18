@@ -108,7 +108,6 @@ HTML_TEMPLATE = """
 def index(): return HTML_TEMPLATE
 
 @app.route('/processar', methods=['POST'])
-@app.route('/processar', methods=['POST'])
 def processar():
     if 'files' not in request.files: return redirect('/')
     files = request.files.getlist('files')
