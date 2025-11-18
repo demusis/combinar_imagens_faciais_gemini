@@ -1,8 +1,8 @@
 import os
 import io
 import base64
-import re
 import time
+import datetime
 import google.generativeai as genai
 from flask import Flask, request, Response, stream_with_context, redirect
 from PIL import Image
@@ -12,215 +12,232 @@ from PIL import Image
 # ==============================================================================
 os.environ["GOOGLE_API_KEY"] = "SUA_CHAVE_API_AQUI"
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
-MODEL_NAME = 'gemini-1.5-pro-latest'
 
-MAX_ATTEMPTS = 3
-TARGET_SCORE = 85
+# Modelo de Raciocínio
+MODEL_NAME = 'gemini-2.5-pro'
+
+app = Flask(__name__)
 
 # ==============================================================================
-# INTERFACE (HTML/JS/CSS)
+# INTERFACE DE DIAGNÓSTICO
 # ==============================================================================
-HTML_HEADER = """
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Console Forense | Alta Fidelidade</title>
+    <title>Console Forense | Modo Debug</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
-        body { font-family: 'Segoe UI', sans-serif; background-color: #eceff1; padding: 20px; color: #333; }
-        .container { max-width: 1100px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
-        h2 { border-bottom: 2px solid #cfd8dc; padding-bottom: 10px; color: #37474f; }
+        body { font-family: 'Consolas', 'Segoe UI', monospace; background-color: #121212; color: #e0e0e0; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         
-        .log-window { background-color: #263238; color: #cfd8dc; font-family: 'Consolas', monospace; padding: 15px; border-radius: 5px; height: 350px; overflow-y: auto; border: 1px solid #455a64; margin-bottom: 20px; font-size: 0.85rem; line-height: 1.5; }
-        .log-line { margin-bottom: 5px; border-bottom: 1px solid #37474f; padding-bottom: 2px; }
-        .log-time { color: #80cbc4; margin-right: 10px; }
+        h2 { border-bottom: 1px solid #333; padding-bottom: 10px; color: #00e676; }
         
-        .progress-container { width: 100%; background-color: #e0e0e0; border-radius: 4px; margin-bottom: 20px; height: 8px; overflow: hidden; }
-        .progress-bar { width: 0%; height: 100%; background-color: #00897b; transition: width 0.5s; }
+        /* Área de Logs (Esquerda) */
+        .log-panel { background-color: #000; border: 1px solid #333; height: 85vh; overflow-y: auto; padding: 10px; font-size: 0.8rem; }
+        .log-entry { margin-bottom: 2px; border-bottom: 1px solid #1a1a1a; padding: 2px 0; word-wrap: break-word; }
+        .ts { color: #5c6bc0; margin-right: 8px; }
+        .type-INFO { color: #b0bec5; }
+        .type-NET { color: #29b6f6; } /* Rede/API */
+        .type-DATA { color: #ab47bc; } /* Dados/Chunks */
+        .type-WARN { color: #ffca28; }
+        .type-ERROR { color: #ef5350; font-weight: bold; background: #2c0b0e; }
+        .type-SUCCESS { color: #66bb6a; font-weight: bold; }
         
-        .gallery img { height: 70px; border: 1px solid #b0bec5; border-radius: 3px; margin-right: 5px; }
-        #final-result-area { display: none; border-top: 3px solid #00897b; margin-top: 20px; padding-top: 20px; }
-        .result-box { background: #e0f2f1; padding: 20px; border-radius: 5px; border-left: 5px solid #00897b; white-space: pre-wrap; font-family: 'Consolas', monospace; }
+        /* Área Visual (Direita) */
+        .visual-panel { background-color: #1e1e1e; padding: 20px; border-radius: 4px; height: 85vh; overflow-y: auto; }
+        .gallery { display: flex; gap: 10px; margin-bottom: 20px; background: #2c2c2c; padding: 10px; border-radius: 4px; }
+        .gallery img { height: 60px; border: 1px solid #555; }
         
-        .btn-submit { background-color: #37474f; color: white; padding: 15px; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; width: 100%; }
-        .btn-submit:hover { background-color: #263238; }
+        .markdown-body { font-family: 'Segoe UI', sans-serif; line-height: 1.6; color: #ddd; }
+        .markdown-body h1, .markdown-body h2 { border-bottom: 1px solid #444; padding-bottom: 5px; color: #81d4fa; }
+        .markdown-body strong { color: #fff; }
+        
+        .btn-submit { background-color: #00e676; color: #000; padding: 15px; width: 100%; border: none; font-weight: bold; cursor: pointer; margin-top: 20px; font-family: monospace; text-transform: uppercase; }
+        .btn-submit:hover { background-color: #00c853; }
     </style>
     <script>
-        function addLog(type, message) {
-            const logWin = document.getElementById('log-window');
-            const now = new Date().toLocaleTimeString();
-            const line = document.createElement('div');
-            line.className = 'log-line';
-            let color = '#b0bec5';
-            if(type === 'WARN') color = '#ffcc80';
-            if(type === 'SUCCESS') color = '#a5d6a7';
-            if(type === 'ERROR') color = '#ef9a9a';
-            line.innerHTML = `<span class="log-time">[${now}]</span><span style="color:${color}">${message}</span>`;
-            logWin.appendChild(line);
-            logWin.scrollTop = logWin.scrollHeight;
+        function log(type, msg) {
+            const box = document.getElementById('log-box');
+            const now = new Date().toISOString().split('T')[1].slice(0, -1); // HH:MM:SS.mmm
+            const div = document.createElement('div');
+            div.className = `log-entry type-${type}`;
+            div.innerHTML = `<span class="ts">[${now}]</span> ${msg}`;
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight;
         }
-        function updateProgress(percent) { document.getElementById('progress-bar').style.width = percent + '%'; }
-        function showResult() { document.getElementById('final-result-area').style.display = 'block'; }
+        
+        function renderReport(b64Text) {
+            const text = new TextDecoder().decode(Uint8Array.from(atob(b64Text), c => c.charCodeAt(0)));
+            document.getElementById('report-content').innerHTML = marked.parse(text);
+        }
     </script>
 </head>
 <body>
     <div class="container">
-        <h2>Sistema Integrado de Reconstrução Craniométrica</h2>
-"""
-
-HTML_FORM = """
-        <form action="/processar" method="post" enctype="multipart/form-data">
-            <div style="background: #f5f5f5; padding: 20px; margin-bottom: 20px; border: 1px dashed #b0bec5;">
-                <label><strong>Upload de Evidências (Degradadas/Multi-ângulo):</strong></label><br><br>
-                <input type="file" name="files" multiple accept=".jpg,.jpeg,.png,.webp" required>
+        <div>
+            <h2>Terminal de Diagnóstico</h2>
+            <div id="log-box" class="log-panel"></div>
+        </div>
+        
+        <div class="visual-panel">
+            <h3>Entrada de Evidências</h3>
+            <form action="/processar" method="post" enctype="multipart/form-data">
+                <input type="file" name="files" multiple accept=".jpg,.jpeg,.png,.webp" required style="width:100%; padding:10px; background:#333; border:1px solid #555; color:#fff;">
+                <button type="submit" class="btn-submit">>> Executar Pipeline (Debug Trace)</button>
+            </form>
+            
+            <div id="gallery-area" style="margin-top:20px;"></div>
+            
+            <div id="report-area" style="margin-top:30px; border-top:2px solid #00e676; padding-top:20px; display:none;">
+                <h3>Relatório Final</h3>
+                <div id="report-content" class="markdown-body"></div>
             </div>
-            <button type="submit" class="btn-submit">INICIAR ANÁLISE & SÍNTESE (STREAMING)</button>
-        </form>
+        </div>
     </div>
 </body>
 </html>
 """
 
 # ==============================================================================
-# LÓGICA DO SERVIDOR
+# LÓGICA
 # ==============================================================================
-app = Flask(__name__)
-
-def extrair_score(texto):
-    try:
-        match = re.search(r'(?:SCORE|NOTA|PONTUAÇÃO).*?(\d{1,3})', texto, re.IGNORECASE)
-        return int(match.group(1)) if match else 0
-    except: return 0
 
 @app.route('/', methods=['GET'])
-def index(): return HTML_HEADER + HTML_FORM
+def index(): return HTML_TEMPLATE
 
+@app.route('/processar', methods=['POST'])
 @app.route('/processar', methods=['POST'])
 def processar():
     if 'files' not in request.files: return redirect('/')
     files = request.files.getlist('files')
-    
+
     pil_images = []
     b64_imgs = []
+    total_bytes = 0
+
     for file in files:
         if file.filename:
             val = file.read()
+            total_bytes += len(val)
             pil_images.append(Image.open(io.BytesIO(val)))
             b64_imgs.append(base64.b64encode(val).decode('utf-8'))
 
     def generate():
-        yield HTML_HEADER
-        yield f'<div class="gallery" style="margin-bottom:20px;">' + ''.join([f'<img src="data:image/jpeg;base64,{img}">' for img in b64_imgs]) + '</div>'
-        yield '<div class="progress-container"><div id="progress-bar" class="progress-bar"></div></div>'
-        yield '<h3>Log de Auditoria (ACE-V)</h3><div id="log-window" class="log-window"></div>'
-        yield '<div id="final-result-area"><h3>Resultado da Perícia</h3><div id="final-content" class="result-box"></div></div>'
+        yield HTML_TEMPLATE
         
-        model = genai.GenerativeModel(MODEL_NAME)
-        
-        # --- ESTÁGIO 1: ANÁLISE ESTRUTURAL ---
-        yield "<script>addLog('INFO', 'Iniciando Mapeamento de Invariantes...'); updateProgress(10);</script>"
-        
-        # Aqui inserimos a PARTE 1 do seu prompt rigoroso
-        prompt_analise = """
-        ATUAÇÃO: Antropólogo Forense Digital.
-        
-        TAREFA: Análise Craniométrica Estática.
-        Analise o dataset e liste o estado dos seguintes marcos (ignorando tecido mole):
-        
-        1. ANCORAGEM DE MARCOS ANATÔMICOS:
-           - Zona Orbital: Distância Intercantal e Cumes Supraorbitais.
-           - Zona Média: Largura Bizigomática e Abertura Piriforme (base nasal óssea).
-           - Zona Inferior: Ângulo Goníaco e Pogonion (mento).
-           - Lateralidade: Morfologia da Orelha (se visível).
-           
-        SAÍDA: Apenas o relatório técnico dos dados brutos observados.
-        """
+        # Renderiza Galeria
+        imgs_html = ''.join([f'<img src="data:image/jpeg;base64,{x}">' for x in b64_imgs])
+        yield f"""<script>
+            document.getElementById('gallery-area').innerHTML = '<div class="gallery">{imgs_html}</div>';
+            log('INFO', 'Sistema Iniciado. PID: {os.getpid()}');
+            log('INFO', 'Imagens Carregadas: {len(pil_images)}');
+            log('INFO', 'Volume Total: {total_bytes/1024:.2f} KB');
+            log('NET', 'Inicializando driver Gemini ({MODEL_NAME})...');
+        </script>"""
         
         try:
-            resp_analise = model.generate_content([prompt_analise] + pil_images)
-            analise_texto = resp_analise.text.replace('\n', '<br>')
-            yield f"<script>addLog('SUCCESS', 'Extração de Marcos Anatômicos concluída.'); updateProgress(25);</script>"
+            model = genai.GenerativeModel(MODEL_NAME)
+            yield "<script>log('SUCCESS', 'Driver IA conectado.');</script>"
         except Exception as e:
-            yield f"<script>addLog('ERROR', 'Erro API: {str(e)}');</script>"
+            yield f"<script>log('ERROR', 'Falha driver: {str(e)}');</script>"
             return
 
-        # --- LOOP RECURSIVO ---
-        feedback = ""
-        melhor_res = ""
+        # ======================================================================
+        # FASE 1: EXTRAÇÃO VETORIAL (COM CONFIRMAÇÃO DE UPLOAD)
+        # ======================================================================
+        yield "<script>log('INFO', '--- INICIANDO FASE 1: BIOMETRIA ---');</script>"
         
-        for i in range(MAX_ATTEMPTS):
-            iter_num = i + 1
-            yield f"<script>addLog('INFO', '>>> Iteração {iter_num}/{MAX_ATTEMPTS}: Síntese e Retificação');</script>"
+        prompt_fase1 = """
+        ATUAÇÃO: Biometrista Forense.
+        TAREFA: Mapear Invariantes Vetoriais.
+        
+        Analise as imagens e descreva estritamente:
+        1. Razões do Triângulo Facial Central.
+        2. Inclinação Cantal (Olhos) e Distância Intercantal.
+        3. Morfologia do Filtro Labial e Arco do Cupido.
+        4. Ângulo Goníaco.
+        
+        SAÍDA: Relatório técnico cru.
+        """
+        
+        analise_acumulada = ""
+        start_t = time.time()
+        
+        try:
+            yield "<script>log('NET', 'Iniciando Upload do Payload (Imagens + Prompt)...');</script>"
             
-            # Aqui inserimos a PARTE 2 (Completa) do seu prompt rigoroso
-            prompt_sintese = f"""
-            CONTEXTO: Perícia Forense Digital e Antropometria Computacional.
-            INPUT: Imagens Originais + Relatório Base.
+            # A chamada com stream=True retorna o iterador assim que o cabeçalho é aceito
+            response_stream = model.generate_content([prompt_fase1] + pil_images, stream=True)
             
-            FEEDBACK OBRIGATÓRIO DA AUDITORIA ANTERIOR: "{feedback}"
+            # SE O CÓDIGO CHEGOU AQUI, O UPLOAD FOI CONCLUÍDO
+            yield "<script>log('SUCCESS', 'Upload Confirmado! Servidor do Google aceitou a requisição.');</script>"
+            yield "<script>log('WARN', 'Aguardando processamento neural (Time To First Token)...');</script>"
             
-            TAREFA DE PROCESSAMENTO E RESTAURAÇÃO:
+            chunk_count = 0
+            for chunk in response_stream:
+                chunk_count += 1
+                text_part = chunk.text if chunk.parts else ""
+                analise_acumulada += text_part
+                
+                # Log do primeiro token (prova de vida)
+                if chunk_count == 1:
+                     yield "<script>log('DATA', '>>> Primeiro token recebido! A IA começou a responder.');</script>"
+                
+                # Log periódico para não poluir demais
+                if chunk_count % 5 == 0:
+                    yield f"<script>log('DATA', 'Recebendo fluxo... ({chunk_count} pacotes)');</script>"
             
-            1. INVARIANTES (Travar estritamente):
-               - Zona Orbital (Intercantal/Supraorbitais).
-               - Zona Média (Bizigomática/Piriforme ignorando cartilagem).
-               - Zona Inferior (Ângulo Goníaco/Pogonion).
-               
-            2. FILTRAGEM DE RUÍDO E RETIFICAÇÃO:
-               - Diferencie pixelização de textura da pele.
-               - Corrija distorções de lente (barrel distortion) via triangulação.
-               - Remova elementos transientes: barba, óculos, sombras de alto contraste.
+            elapsed = time.time() - start_t
+            yield f"<script>log('SUCCESS', 'Fase 1 concluída em {elapsed:.2f}s.');</script>"
             
-            OUTPUT SOLICITADO:
-            Síntese Visual/Descritiva em "Norma de Identificação Civil":
-            - Pose: Frontalidade absoluta (Plano de Frankfurt alinhado).
-            - Iluminação: Difusa (Flat Lighting) para evidenciar volumetria.
-            - Expressão: Neutra (repouso mecânico).
-            """
-            
-            resp_sintese = model.generate_content([prompt_sintese] + pil_images)
-            sintese_atual = resp_sintese.text
-            
-            yield f"<script>addLog('INFO', 'Síntese {iter_num} gerada. Validando Invariantes...'); updateProgress({25 + (iter_num * 20)});</script>"
-            
-            # Estágio 3: Auditoria
-            prompt_auditoria = f"""
-            ATUAÇÃO: Auditor de Qualidade Forense.
-            PROPOSTA: "{sintese_atual}"
-            
-            CRITÉRIOS RÍGIDOS:
-            1. O Pogonion e Ângulo Goníaco foram preservados?
-            2. O Plano de Frankfurt está alinhado (0º Pitch)?
-            3. Houve remoção correta de transientes (barba/óculos)?
-            
-            SAÍDA: 1. SCORE [0-100]. 2. JUSTIFICATIVA. 3. CORREÇÃO NECESSÁRIA.
-            """
-            
-            resp_auditoria = model.generate_content([prompt_auditoria] + pil_images)
-            auditoria_texto = resp_auditoria.text
-            score = extrair_score(auditoria_texto)
-            
-            if score >= TARGET_SCORE:
-                yield f"<script>addLog('SUCCESS', 'AUDITORIA APROVADA! Score: {score}/100.'); updateProgress(100);</script>"
-                melhor_res = sintese_atual
-                break
-            else:
-                yield f"<script>addLog('WARN', 'Reprovado (Score {score}). Ajustando parâmetros para próxima iteração...');</script>"
-                feedback = auditoria_texto
-                if iter_num == MAX_ATTEMPTS:
-                    yield "<script>addLog('ERROR', 'Máximo de tentativas atingido. Entregando melhor resultado viável.');</script>"
-                    melhor_res = sintese_atual
+            if not analise_acumulada:
+                yield "<script>log('ERROR', 'A API aceitou o upload mas retornou texto vazio (Bloqueio de Segurança?).');</script>"
 
-        final_safe = melhor_res.replace('"', '&quot;').replace('\n', '\\n')
-        yield f"""<script>
-            document.getElementById('final-content').innerText = "{final_safe}";
-            showResult();
-            addLog('INFO', 'Processo encerrado.');
-        </script></div></body></html>"""
+        except Exception as e:
+            yield f"<script>log('ERROR', 'ERRO DURANTE TRANSMISSÃO: {str(e)}');</script>"
+            return
+
+        # ======================================================================
+        # FASE 2: SÍNTESE
+        # ======================================================================
+        yield "<script>log('INFO', '--- INICIANDO FASE 2: SÍNTESE ---');</script>"
+        
+        prompt_fase2 = f"""
+        CONTEXTO BIOMÉTRICO:
+        {analise_acumulada}
+        
+        TAREFA: Laudo Pericial em Markdown.
+        1. ## Análise Vetorial.
+        2. ## Síntese Visual (Descrição da face em pose frontal 0º).
+        3. ## Conclusão.
+        """
+        
+        relatorio_final = ""
+        
+        try:
+            yield "<script>log('NET', 'Enviando dados da Fase 2...');</script>"
+            response_stream_2 = model.generate_content([prompt_fase2] + pil_images, stream=True)
+            yield "<script>log('SUCCESS', 'Upload Fase 2 Confirmado. Aguardando geração do laudo...');</script>"
+            
+            for chunk in response_stream_2:
+                if chunk.text: relatorio_final += chunk.text
+            
+            yield "<script>log('SUCCESS', 'Laudo recebido. Renderizando...');</script>"
+
+            b64_final = base64.b64encode(relatorio_final.encode('utf-8')).decode('utf-8')
+            yield f"""<script>
+                document.getElementById('report-area').style.display = 'block';
+                renderReport("{b64_final}");
+                log('INFO', 'Processo finalizado com sucesso.');
+            </script>"""
+
+        except Exception as e:
+            yield f"<script>log('ERROR', 'ERRO FASE 2: {str(e)}');</script>"
 
     return Response(stream_with_context(generate()), mimetype='text/html')
 
 if __name__ == '__main__':
-    print("Servidor Forense Rigoroso (Streaming) ativo em http://127.0.0.1:5000")
+    print("Debug Server ativo: http://127.0.0.1:5000")
     app.run(debug=True, port=5000, threaded=True)
